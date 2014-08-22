@@ -36,14 +36,6 @@ cookbook_file "cookbook_test_file" do
   action :create
 end
 
-service "webpage" do
-  action [ :enable, :start ]
-end
-
-service "nginx" do
-  action :restart 
-end
-
 cookbook_file "nginx_config_file" do
   path "/etc/nginx/sites-enabled/default"
   mode 0644
@@ -71,3 +63,10 @@ cookbook_file "psgi" do
   action :create
 end
 
+service "webpage" do
+  action [ :start, :enable ]
+end
+
+service "nginx" do
+  action :restart 
+end
