@@ -9,6 +9,10 @@
 
 include_recipe "nginx" 
 
+package "libplack-perl" do
+  action :install
+end
+
 directory "/var/www" do
   owner "root"
   group "root"
@@ -16,8 +20,7 @@ directory "/var/www" do
   action :create
 end
 
-
-directory "/var/www/nginx-default" do
+file "/var/www/app.psgi" do
   owner "root"
   group "root"
   mode 00755
@@ -25,14 +28,46 @@ directory "/var/www/nginx-default" do
 end
 
 cookbook_file "cookbook_test_file" do
-  path "/var/www/nginx-default/index.html"
+  path "/etc/init.d/webpage"
+  mode 0755
+  owner "root"
+  group "root"
+  source "webpage"
+  action :create
+end
+
+service "webpage" do
+  action [ :enable, :start ]
+end
+
+service "nginx" do
+  action :restart 
+end
+
+cookbook_file "nginx_config_file" do
+  path "/etc/nginx/sites-enabled/default"
   mode 0644
   owner "root"
   group "root"
-  source "index.html"
-  action :create_if_missing
+  source "nginx_default"
+  action :create
 end
 
+cookbook_file "doit_executable" do
+  path "/usr/bin/doit"
+  mode 0755
+  owner "root"
+  group "root"
+  source "doit"
+  action :create
+end
 
-
+cookbook_file "psgi" do
+  path "/var/www/app.psgi"
+  mode 0755
+  owner "root"
+  group "root"
+  source "app.psgi"
+  action :create
+end
 

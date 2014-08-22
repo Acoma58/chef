@@ -1,0 +1,3 @@
+#!/bin/bash
+
+su - ubuntu -c "/usr/bin/plackup -l 127.0.0.1:5000 --access-log /var/tmp/access.log --daemonize  /var/www/app.psgi &"
