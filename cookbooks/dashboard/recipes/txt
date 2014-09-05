@@ -1,0 +1,242 @@
+import traceback
+import time
+import os
+
+from fabric.api import env
+from fabric.api import sudo, run, put
+from fabric.contrib.files import upload_template
+from fabric.exceptions import NetworkError
+
+import fbn.common.ec2 as ec2
+import fbn.common.settings as settings
+
+env.key_filename = settings.AWS['secrets']['aws_key_path']
+aws_key = settings.AWS['secrets']['aws_key']
+aws_secret = settings.AWS['secrets']['aws_secret']
+remote_dir = '/home/ubuntu/'
+remote_code_dir = os.path.join(remote_dir, 'science')
+
+machines = {
+    'staging': ["ec2-54-186-253-23.us-west-2.compute.amazonaws.com"],
+    'qa': [""],
+    'etl': ["ec2-54-200-67-124.us-west-2.compute.amazonaws.com"],
+    'prod_weather': ["ec2-54-187-164-146.us-west-2.compute.amazonaws.com"]
+}
+
+STAGING_HOST = machines['staging'][0]
+ETL_HOST = machines['etl'][0]
+PROD_WEATHER_HOST = machines['prod_weather'][0]
+
+
+def dir_exists(location):
+    return run('test -d %s && echo OK ; true' % (location)).endswith("OK")
+
+def file_exists(location):
+    return run('test -f %s && echo OK ; true' % (location)).endswith("OK")
+
+def install_packages():
+    # Install packages with yum
+    sudo('apt-get -y install git python-dev nginx s3cmd')
+    sudo('apt-get -y install gdal-bin')
+    sudo('apt-get -y install r-base python-gdal libpq-dev postgresql-9.3-postgis-2.1')
+    sudo('apt-get -y install libcurl4-openssl-dev libxml2-dev')
+
+    # Install RServe
+    run('wget https://s3.amazonaws.com/fbndeploy/Rserve_1.8-0.tar.gz')
+    sudo('R CMD INSTALL Rserve_1.8-0.tar.gz')
+
+    # Install R packages needed
+    run('wget https://s3.amazonaws.com/fbndeploy/mgcv_1.8-0.tar.gz')
+    sudo('R CMD INSTALL mgcv_1.8-0.tar.gz')
+
+    # Install R packages needed - Order matters here - dependencies need to go
+    # in first.
+    run('wget https://s3.amazonaws.com/fbndeploy/mgcv_1.8-0.tar.gz')
+    sudo('R CMD INSTALL mgcv_1.8-0.tar.gz')
+    run('wget https://s3.amazonaws.com/fbndeploy/e1071_1.6-3.tar.gz')
+    sudo('R CMD INSTALL e1071_1.6-3.tar.gz')
+    run('wget https://s3.amazonaws.com/fbndeploy/randomForest_4.6-7.tar.gz')
+    sudo('R CMD INSTALL randomForest_4.6-7.tar.gz')
+
+    run('wget https://s3.amazonaws.com/fbndeploy/XML_3.98-1.1.tar.gz')
+    sudo('R CMD INSTALL XML_3.98-1.1.tar.gz')
+
+    run('wget https://s3.amazonaws.com/fbndeploy/sp_1.0-15.tar.gz')
+    sudo('R CMD INSTALL sp_1.0-15.tar.gz')
+    run('wget https://s3.amazonaws.com/fbndeploy/bitops_1.0-6.tar.gz')
+    sudo('R CMD INSTALL bitops_1.0-6.tar.gz')
+    run('wget https://s3.amazonaws.com/fbndeploy/geosphere_1.3-8.tar.gz')
+    sudo('R CMD INSTALL geosphere_1.3-8.tar.gz')
+    run('wget https://s3.amazonaws.com/fbndeploy/maptools_0.8-30.tar.gz')
+    sudo('R CMD INSTALL maptools_0.8-30.tar.gz')
+
+def setup_postgis():
+    sudo('service postgresql start')
+    
+    # As postgres
+    with settings(sudo_user='postgres'):
+        sudo('createuser ubuntu')
+        sudo('createdb -U ubuntu ubuntu')
+        sudo("echo 'GRANT ALL PRIVILEGES ON ubuntu TO ubuntu;' | psql")
+        sudo("echo 'ALTER ROLE ubuntu WITH SUPERUSER;' | psql")
+
+    run("echo 'CREATE EXTENSION postgis;' | psql")
+    run("echo 'CREATE EXTENSION postgis_topology;' | psql")
+    run("echo 'CREATE EXTENSION fuzzystrmatch;' | psql")
+    run("echo 'CREATE EXTENSION postgis_tiger_geocoder;' | psql")
+
+def setup_weather_cron():
+    # Set crontab file
+    run('crontab ~/science/weather/cronjob/cron_backup')
+    run("echo 'fbngeofeatures.cmamvx7xom25.us-west-2.rds.amazonaws.com:5432:fbngeofeatures:fbnadmin:7r61YEMLsh5P\nfbn-production-db.cmamvx7xom25.us-west-2.rds.amazonaws.com:5432:fbnproduction:fbnadmin:7r61YEMLsh5P' > ~/.pgpass")
+    run("sudo chmod 600 ~/.pgpass")
+    run("sudo chown ubuntu:ubuntu ~/.pgpass")
+    
+def install_pip():
+    # Install pip
+    run('wget https://bootstrap.pypa.io/get-pip.py')
+    sudo('sudo python get-pip.py')
+
+
+def checkout_code():
+    # Checkout Code from GitHub
+    github_fingerprint = "github.com,207.97.227.239 ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ=="
+
+    run(""" echo '%s' >> .ssh/known_hosts """ % github_fingerprint , pty=True)
+    put("ssh-config", ".ssh/config", mode=0600)
+    put('keys/id_rsa', '.ssh/', mode=0600)
+    put('keys/id_rsa.pub', '.ssh/')
+    if dir_exists(remote_code_dir):
+        run('cd %s ; git pull; true' % remote_code_dir)
+    else:
+        run('git clone github:%s %s' % (settings.REPO, remote_code_dir) )
+    # Copy latest aws key / secret
+    put('python/common/local_settings.py', '%s/python/common/local_settings.py' % (remote_code_dir))
+
+def install_python_modules():
+    # Install python requirements
+    put('requirements.txt', '%srequirements.txt' % remote_dir)
+    sudo('pip install --ignore-installed -r %s/requirements.txt' % (remote_dir))
+
+
+def install_r_models():
+    sudo('mkdir -p /mnt/models')
+    sudo('chown -R ubuntu /mnt/models')
+    sudo('mkdir -p /mnt/logs/R/Rserv')
+    sudo('chown -R ubuntu /mnt/logs')
+
+
+def setup_s3():
+    upload_template('common/s3cfg', '%s.s3cfg' % remote_dir, {'access_key':aws_key, 'access_secret':aws_secret})
+
+def start_rserve():
+    put('bin/init/rserve', '/etc/init.d/rserve', use_sudo=True, mode=0755)
+    # Start RServe
+    #sudo('service rserve start')
+    run('cd %s ; bin/rserve' % remote_code_dir)
+
+def stop_rserve():
+    run('killall Rserve')
+
+def start_nginx():
+    # start nginx
+    put('common/nginx.conf', '/etc/nginx/', use_sudo=True)
+    if file_exists('/var/run/nginx.pid'):
+        sudo('service nginx stop')
+    sudo('service nginx start')
+
+def start_api():
+    # Start API server
+    if file_exists('/tmp/gunicorn.pid'):
+        run('kill $(cat /tmp/gunicorn.pid)')
+    run('cd %s ; bin/api_server' % (remote_code_dir), pty=False )
+
+def create_instance():
+    """ Just Creates an Amazon Instance """
+    instance = ec2.create_new_instance()
+    return instance
+
+def deploy_etl():
+    env.host_string = "ubuntu@%s" % (ETL_HOST)    
+    return try_install_reqs() and try_install_web()
+
+def deploy_prod_weather():
+    env.host_string = "ubuntu@%s" % (PROD_WEATHER_HOST)
+    return try_install_reqs() and try_install_web()
+
+def deploy_staging_web():
+    env.host_string = "ubuntu@%s" % (STAGING_HOST)
+    return try_install_reqs() and try_install_web()
+
+def deploy_web():
+    # Create New Instance
+    instance = ec2.create_new_instance()
+
+    # Set Env Host String
+    env.host_string = "ubuntu@%s" % (instance.ip_address)
+    return try_install_reqs() and try_install_web()
+
+def try_install_reqs():
+    connect_attempts = 0
+    while connect_attempts <= 3:
+        try:
+            install_reqs()
+            break
+        except NetworkError:
+            print "Failed to connect: used attempt %s of 3" % \
+                                            (connect_attempts)
+            connect_attempts += 1
+            time.sleep(10)
+        except:
+            print traceback.format_exc()
+            print "Failed to install_reqs"
+            break
+
+    return True
+
+def try_install_web():
+    connect_attempts = 0
+    while connect_attempts <= 3:
+        try:
+            install_web()
+            break
+        except NetworkError:
+            print "Failed to connect: used attempt %s of 3" % \
+                                            (connect_attempts)
+            connect_attempts += 1
+            time.sleep(10)
+        except:
+            print traceback.format_exc()
+            print "Failed to install_web"
+            break
+
+    return True
+
+def install_reqs():
+    install_packages()
+    install_pip()
+    install_python_modules()
+
+def install_web():
+    checkout_code()
+    install_r_models()
+    setup_s3()
+    start_rserve()
+    start_api()
+    start_nginx()
+
+
+# Simple Fab Functions
+##########################
+def host_type():
+    run('uname -a')
+
+def free_space():
+    run('df -h')
+
+def what_is_my_name():
+    run('whoami')
+
+def what_is_sudos_name():
+    sudo('whoami')
+
