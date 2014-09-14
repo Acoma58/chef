@@ -74,5 +74,14 @@ service "postgresql" do
  supports :status => true, :restart => true, :reload => true
  action [:enable, :start]
 end
- 
 
+for pcommand in [ 'createuser ubuntu', 'createdb -U ubuntu ubuntu', "echo 'GRANT ALL PRIVILEGES ON ubuntu TO ubuntu;' | psql", "echo 'ALTER ROLE ubuntu WITH SUPERUSER;' | psql", "touch $HOME/.done"] do
+execute "do_postgres_stuff" do
+   not_if do ::File.exists?("/var/lib/postgresql/.done") end
+   cwd "/var/lib/postgresql"
+   user "postgres"
+   action :run
+   environment ({'HOME' => '/var/lib/postgresql', 'USER' => 'postgres'})
+   command pcommand
+ end
+end
